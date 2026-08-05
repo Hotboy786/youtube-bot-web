@@ -24,7 +24,7 @@ USER_AGENTS = [
 API_KEY_FROM_SECRETS = st.secrets.get("YOUTUBE_API_KEY", "")
 PROXIES_FROM_SECRETS = st.secrets.get("PROXIES", [])
 
-st.set_page_config(page_title="YouTube Automation Tool", layout="centered")
+st.set_page_config(page_title="Madara Bot Service", layout="centered")
 
 # --- JSON DATABASE HELPER FUNCTIONS ---
 def load_users():
@@ -39,7 +39,6 @@ def load_users():
     try:
         with open(USER_DB_FILE, "r") as f:
             users = json.load(f)
-            # Ensure Admin exists with approved status
             if ADMIN_EMAIL not in users:
                 users[ADMIN_EMAIL] = {"status": "approved", "role": "admin"}
                 save_users(users)
@@ -52,12 +51,21 @@ def save_users(users):
     with open(USER_DB_FILE, "w") as f:
         json.dump(users, f, indent=4)
 
-# Load users on runtime
 users_db = load_users()
 
-# Initialize Session State
+# --- INITIALIZE PERSISTENT SESSION VIA QUERY PARAMS ---
+query_params = st.query_params
+saved_user_param = query_params.get("user", None)
+
 if "logged_in_user" not in st.session_state:
-    st.session_state.logged_in_user = None
+    if saved_user_param and saved_user_param in users_db:
+        if users_db[saved_user_param].get("status") == "approved":
+            st.session_state.logged_in_user = saved_user_param
+        else:
+            st.session_state.logged_in_user = None
+    else:
+        st.session_state.logged_in_user = None
+
 if "video_data" not in st.session_state:
     st.session_state.video_data = None
 
@@ -74,24 +82,27 @@ if st.session_state.logged_in_user is None:
         else:
             if email_input == ADMIN_EMAIL:
                 st.session_state.logged_in_user = email_input
-                st.success("Welcome back, Admin!")
+                st.query_params["user"] = email_input  # Persist login in URL
+                st.success("Welcome to Madara Bot Service!")
+                time.sleep(1)
                 st.rerun()
             elif email_input in users_db:
                 status = users_db[email_input].get("status")
                 if status == "approved":
                     st.session_state.logged_in_user = email_input
-                    st.success("Login successful!")
+                    st.query_params["user"] = email_input  # Persist login in URL
+                    st.success("Welcome to Madara Bot Service!")
+                    time.sleep(1)
                     st.rerun()
                 elif status == "pending":
                     st.warning("Your access request is currently PENDING approval from the Admin.")
                 elif status == "rejected":
                     st.error("Your access request was rejected by the Admin.")
             else:
-                # Add new user as pending
                 users_db[email_input] = {"status": "pending", "role": "user"}
                 save_users(users_db)
                 st.info("Access request sent to Admin! Please wait for approval before logging in.")
-    st.stop()  # Stop app execution if user is not authenticated
+    st.stop()
 
 # --- LOGGED IN HEADER ---
 user_email = st.session_state.logged_in_user
@@ -106,7 +117,13 @@ else:
 if st.sidebar.button("Logout"):
     st.session_state.logged_in_user = None
     st.session_state.video_data = None
+    if "user" in st.query_params:
+        del st.query_params["user"]  # Clear persistent login from URL
     st.rerun()
+
+# --- WELCOME BANNER ---
+st.title("🔥 Welcome to Madara Bot Service")
+st.caption("Fetch metadata via YouTube Data API v3 & automate playback via Selenium")
 
 # --- ADMIN PANEL (Visible ONLY to kingtechnical421@gmail.com) ---
 if is_admin:
@@ -141,10 +158,6 @@ if is_admin:
     st.markdown("---")
 
 # --- MAIN AUTOMATION TOOL (ACCESSIBLE TO APPROVED USERS) ---
-st.title("YouTube Automation Tool")
-st.caption("Fetch metadata via YouTube Data API v3 & automate playback via Selenium")
-
-# Helper functions for YouTube & Driver
 def extract_video_id(url):
     patterns = [
         r"(?:v=|\/)([0-9A-Za-z_-]{11}).*",
