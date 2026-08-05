@@ -6,6 +6,7 @@ import time
 import zipfile
 import requests
 import streamlit as st
+import concurrent.futures
 from selenium import webdriver
 from selenium.webdriver.chrome.options import Options
 from selenium.webdriver.chrome.service import Service
@@ -24,15 +25,12 @@ USER_AGENTS = [
 API_KEY_FROM_SECRETS = st.secrets.get("YOUTUBE_API_KEY", "")
 PROXIES_FROM_SECRETS = st.secrets.get("PROXIES", [])
 
-st.set_page_config(page_title="Madara Bot Service", layout="centered")
+st.set_page_config(page_title="Madara Bot Service", layout="wide")
 
 # --- JSON DATABASE HELPER FUNCTIONS ---
 def load_users():
-    """Load user data from users.json file."""
     if not os.path.exists(USER_DB_FILE):
-        default_db = {
-            ADMIN_EMAIL: {"status": "approved", "role": "admin"}
-        }
+        default_db = {ADMIN_EMAIL: {"status": "approved", "role": "admin"}}
         with open(USER_DB_FILE, "w") as f:
             json.dump(default_db, f, indent=4)
         return default_db
@@ -47,7 +45,6 @@ def load_users():
         return {ADMIN_EMAIL: {"status": "approved", "role": "admin"}}
 
 def save_users(users):
-    """Save user data back to users.json file."""
     with open(USER_DB_FILE, "w") as f:
         json.dump(users, f, indent=4)
 
@@ -82,7 +79,7 @@ if st.session_state.logged_in_user is None:
         else:
             if email_input == ADMIN_EMAIL:
                 st.session_state.logged_in_user = email_input
-                st.query_params["user"] = email_input  # Persist login in URL
+                st.query_params["user"] = email_input
                 st.success("Welcome to Madara Bot Service!")
                 time.sleep(1)
                 st.rerun()
@@ -90,7 +87,7 @@ if st.session_state.logged_in_user is None:
                 status = users_db[email_input].get("status")
                 if status == "approved":
                     st.session_state.logged_in_user = email_input
-                    st.query_params["user"] = email_input  # Persist login in URL
+                    st.query_params["user"] = email_input
                     st.success("Welcome to Madara Bot Service!")
                     time.sleep(1)
                     st.rerun()
@@ -118,18 +115,16 @@ if st.sidebar.button("Logout"):
     st.session_state.logged_in_user = None
     st.session_state.video_data = None
     if "user" in st.query_params:
-        del st.query_params["user"]  # Clear persistent login from URL
+        del st.query_params["user"]
     st.rerun()
 
 # --- WELCOME BANNER ---
 st.title("🔥 Welcome to Madara Bot Service")
-st.caption("Fetch metadata via YouTube Data API v3 & automate playback via Selenium")
+st.caption("Multi-threaded playback automation with live visual stream tracking")
 
-# --- ADMIN PANEL (Visible ONLY to kingtechnical421@gmail.com) ---
+# --- ADMIN PANEL ---
 if is_admin:
     st.markdown("## 🛡️ Admin Control Panel")
-    st.caption("Manage pending user requests and view all registered accounts.")
-    
     pending_users = [email for email, data in users_db.items() if data.get("status") == "pending"]
     
     if pending_users:
@@ -137,13 +132,11 @@ if is_admin:
         for p_email in pending_users:
             col_email, col_approve, col_reject = st.columns([3, 1, 1])
             col_email.write(p_email)
-            
             if col_approve.button("Approve", key=f"app_{p_email}"):
                 users_db[p_email]["status"] = "approved"
                 save_users(users_db)
                 st.success(f"Approved {p_email}")
                 st.rerun()
-                
             if col_reject.button("Reject", key=f"rej_{p_email}"):
                 users_db[p_email]["status"] = "rejected"
                 save_users(users_db)
@@ -157,7 +150,7 @@ if is_admin:
 
     st.markdown("---")
 
-# --- MAIN AUTOMATION TOOL (ACCESSIBLE TO APPROVED USERS) ---
+# --- HELPER FUNCTIONS ---
 def extract_video_id(url):
     patterns = [
         r"(?:v=|\/)([0-9A-Za-z_-]{11}).*",
@@ -185,11 +178,9 @@ def fetch_api_metadata(video_id, api_key):
     try:
         response = requests.get(endpoint)
         data = response.json()
-        
         if "error" in data:
             st.error(f"API Error: {data['error']['message']}")
             return None
-        
         items = data.get("items", [])
         if not items:
             st.error("No video found for this Video ID.")
@@ -199,14 +190,12 @@ def fetch_api_metadata(video_id, api_key):
         snippet = video_info.get("snippet", {})
         content_details = video_info.get("contentDetails", {})
         statistics = video_info.get("statistics", {})
-
         thumbnails = snippet.get("thumbnails", {})
         thumb_url = (
             thumbnails.get("maxres", {}).get("url") or 
             thumbnails.get("high", {}).get("url") or 
             thumbnails.get("default", {}).get("url")
         )
-
         return {
             "title": snippet.get("title", "Unknown Title"),
             "duration_sec": parse_iso8601_duration(content_details.get("duration", "PT0S")),
@@ -224,7 +213,6 @@ def create_proxy_auth_extension(proxy_url):
         return None, proxy_url.replace("http://", "")
 
     user, password, host, port = match.groups()
-
     manifest_json = """
     {
         "version": "1.0.0",
@@ -235,7 +223,6 @@ def create_proxy_auth_extension(proxy_url):
         "minimum_chrome_version": "22.0.0"
     }
     """
-
     background_js = f"""
     var config = {{
         mode: "fixed_servers",
@@ -247,13 +234,43 @@ def create_proxy_auth_extension(proxy_url):
     }}
     chrome.webRequest.onAuthRequired.addListener(callbackFn, {{urls: ["<all_urls>"]}}, ['blocking']);
     """
-
     pluginpath = f'/tmp/proxy_auth_plugin_{random.randint(1000, 9999)}.zip'
     with zipfile.ZipFile(pluginpath, 'w') as zp:
         zp.writestr("manifest.json", manifest_json)
         zp.writestr("background.js", background_js)
 
     return pluginpath, None
+
+def get_headless_driver():
+    chrome_options = Options()
+    chrome_options.add_argument("--headless=new")
+    chrome_options.add_argument("--no-sandbox")
+    chrome_options.add_argument("--disable-dev-shm-usage")
+    chrome_options.add_argument("--disable-gpu")
+    chrome_options.add_argument("--window-size=1280,720")
+    chrome_options.add_argument("--autoplay-policy=no-user-gesture-required")
+    chrome_options.add_argument("--mute-audio")
+    chrome_options.binary_location = "/usr/bin/chromium"
+
+    random_user_agent = random.choice(USER_AGENTS)
+    chrome_options.add_argument(f"user-agent={random_user_agent}")
+
+    pluginpath = None
+    if PROXIES_FROM_SECRETS:
+        selected_proxy = random.choice(PROXIES_FROM_SECRETS)
+        pluginpath, unauth_proxy = create_proxy_auth_extension(selected_proxy)
+        if pluginpath:
+            chrome_options.add_extension(pluginpath)
+        elif unauth_proxy:
+            chrome_options.add_argument(f"--proxy-server=http://{unauth_proxy}")
+
+    service = Service("/usr/bin/chromedriver")
+    driver = webdriver.Chrome(service=service, options=chrome_options)
+
+    if pluginpath and os.path.exists(pluginpath):
+        os.remove(pluginpath)
+
+    return driver
 
 # --- STEP 1: API KEY & URL INPUT ---
 api_key = API_KEY_FROM_SECRETS
@@ -281,7 +298,7 @@ if submit_btn:
                     st.session_state.video_data = metadata
                     st.success("Metadata successfully loaded!")
 
-# --- STEP 2: DISPLAY METADATA & AUTOMATION SETTINGS ---
+# --- STEP 2: DISPLAY METADATA & MULTI-THREAD SETTINGS ---
 if st.session_state.video_data:
     vdata = st.session_state.video_data
     
@@ -302,103 +319,104 @@ if st.session_state.video_data:
         st.write(f"**Current Total Views on YouTube:** {formatted_views}")
 
     st.markdown("---")
-    st.subheader("Automation Setup")
+    st.subheader("Multi-Threaded Automation Setup")
     
     if PROXIES_FROM_SECRETS:
         st.info(f"Proxy pool active: {len(PROXIES_FROM_SECRETS)} rotating proxies loaded from Secrets.")
     else:
         st.warning("No proxies configured in Secrets. Running directly from server IP.")
 
-    total_views = st.number_input("Target Total Views to Generate", min_value=1, value=10, step=1)
-    watch_duration = st.number_input("Playback Duration per view (seconds)", min_value=1, value=max(1, vdata['duration_sec']))
+    col_threads, col_views, col_dur = st.columns(3)
+    num_threads = col_threads.number_input("Concurrent Tabs / Threads", min_value=1, max_value=8, value=3, help="How many browsers run at the exact same time")
+    total_views = col_views.number_input("Target Total Views to Generate", min_value=1, value=10, step=1)
+    watch_duration = col_dur.number_input("Playback Duration per view (seconds)", min_value=5, value=max(5, vdata['duration_sec']))
 
-    def get_headless_driver():
-        chrome_options = Options()
-        chrome_options.add_argument("--headless=new")
-        chrome_options.add_argument("--no-sandbox")
-        chrome_options.add_argument("--disable-dev-shm-usage")
-        chrome_options.add_argument("--disable-gpu")
-        chrome_options.add_argument("--autoplay-policy=no-user-gesture-required")
-        chrome_options.add_argument("--mute-audio")
-        chrome_options.binary_location = "/usr/bin/chromium"
-
-        random_user_agent = random.choice(USER_AGENTS)
-        chrome_options.add_argument(f"user-agent={random_user_agent}")
-
-        pluginpath = None
-        if PROXIES_FROM_SECRETS:
-            selected_proxy = random.choice(PROXIES_FROM_SECRETS)
-            pluginpath, unauth_proxy = create_proxy_auth_extension(selected_proxy)
-            if pluginpath:
-                chrome_options.add_extension(pluginpath)
-            elif unauth_proxy:
-                chrome_options.add_argument(f"--proxy-server=http://{unauth_proxy}")
-
-        service = Service("/usr/bin/chromedriver")
-        driver = webdriver.Chrome(service=service, options=chrome_options)
-
-        if pluginpath and os.path.exists(pluginpath):
-            os.remove(pluginpath)
-
-        return driver
-
-   # --- STEP 3: START AUTOMATION WITH REAL-TIME STATS ---
+    # --- STEP 3: START PARALLEL MULTI-THREADED AUTOMATION ---
     if st.button("Start Automation"):
-        # Real-time metrics dashboard counters
+        st.markdown("### 🖥️ Live Browser Stream Views")
+        st.caption("Screen capture previews updating live for every running tab")
+        
+        # Grid of screen capture boxes for each thread
+        grid_cols = st.columns(num_threads)
+        preview_placeholders = [grid_cols[i].empty() for i in range(num_threads)]
+        
+        st.markdown("### 📊 Real-Time Analytics Dashboard")
+        m1, m2, m3 = st.columns(3)
+        metric_succ = m1.metric("Successful Views", 0)
+        metric_fail = m2.metric("Failed Views", 0)
+        metric_progress = m3.metric("Progress Goal", f"0 / {total_views}")
+
+        progress_bar = st.progress(0)
+        st.markdown("#### 📜 Live System Log")
+        log_box = st.empty()
+
         success_count = 0
         failed_count = 0
-        
-        # Display Containers for real-time updates
-        st.markdown("### 📊 Real-Time Automation Stats")
-        col_succ, col_fail, col_total = st.columns(3)
-        
-        metric_succ = col_succ.metric("Successful Views", 0)
-        metric_fail = col_fail.metric("Failed Views", 0)
-        metric_total = col_total.metric("Target Goal", f"0 / {total_views}")
-
-        status_text = st.empty()
-        progress_bar = st.progress(0)
-        
-        st.markdown("#### 📜 Live Execution Logs")
-        log_box = st.empty()
+        completed_views = 0
         logs = []
 
-        for current_view in range(1, int(total_views) + 1):
-            timestamp = time.strftime("%H:%M:%S")
-            status_text.info(f"⏳ Running session {current_view} of {total_views}...")
-            
+        def run_single_view(thread_id, view_num):
+            """Executes one view on a browser and continuously sends screenshot back to UI."""
             driver = None
-            session_success = False
-            
             try:
+                preview_placeholders[thread_id].info(f"Tab {thread_id+1}: Launching Browser...")
                 driver = get_headless_driver()
                 driver.get(url_input)
-                time.sleep(3)
+                time.sleep(2)
 
+                # Play video
                 driver.execute_script(
                     "var video = document.querySelector('video'); if(video) { video.muted = true; video.play(); }"
                 )
-                
-                time.sleep(watch_duration)
-                session_success = True
-                
+
+                # Loop to capture live small screen screenshots during watch duration
+                steps = max(1, int(watch_duration // 3))
+                for _ in range(steps):
+                    time.sleep(3)
+                    try:
+                        screenshot = driver.get_screenshot_as_png()
+                        preview_placeholders[thread_id].image(
+                            screenshot,
+                            caption=f"Tab #{thread_id+1} | View #{view_num} Playing...",
+                            use_container_width=True
+                        )
+                    except Exception:
+                        pass
+
+                return True, thread_id, f"✅ Tab {thread_id+1}: View #{view_num} finished successfully."
             except Exception as e:
-                logs.append(f"❌ [{timestamp}] Session {current_view}/{total_views} Failed - Error: {e}")
-                failed_count += 1
-            else:
-                logs.append(f"✅ [{timestamp}] Session {current_view}/{total_views} Completed Successfully!")
-                success_count += 1
+                return False, thread_id, f"❌ Tab {thread_id+1}: View #{view_num} failed - {e}"
             finally:
                 if driver:
                     driver.quit()
 
-            # Update real-time metric UI components
-            metric_succ.metric("Successful Views", success_count)
-            metric_fail.metric("Failed Views", failed_count)
-            metric_total.metric("Progress", f"{current_view} / {total_views}")
+        # Batch execution over thread pool
+        with concurrent.futures.ThreadPoolExecutor(max_workers=num_threads) as executor:
+            futures = []
             
-            # Update Progress Bar & Execution Log Container
-            progress_bar.progress(current_view / total_views)
-            log_box.code("\n".join(logs[-10:]), language="text")  # Display last 10 log entries
+            for i in range(total_views):
+                thread_assigned = i % num_threads
+                futures.append(executor.submit(run_single_view, thread_assigned, i + 1))
+            
+            for future in concurrent.futures.as_completed(futures):
+                passed, t_id, log_msg = future.result()
+                completed_views += 1
+                
+                timestamp = time.strftime("%H:%M:%S")
+                logs.append(f"[{timestamp}] {log_msg}")
+                
+                if passed:
+                    success_count += 1
+                    preview_placeholders[t_id].success(f"Tab #{t_id+1}: Done!")
+                else:
+                    failed_count += 1
+                    preview_placeholders[t_id].error(f"Tab #{t_id+1}: Error")
 
-        status_text.success(f"🎉 Automation finished! Final stats: {success_count} Passed, {failed_count} Failed.")
+                # Real-time UI updates
+                metric_succ.metric("Successful Views", success_count)
+                metric_fail.metric("Failed Views", failed_count)
+                metric_progress.metric("Progress Goal", f"{completed_views} / {total_views}")
+                progress_bar.progress(completed_views / total_views)
+                log_box.code("\n".join(logs[-10:]), language="text")
+
+        st.success(f"🎉 All threads finished! Total Views completed: {success_count} Success, {failed_count} Failed.")
