@@ -4,6 +4,7 @@ import random
 import re
 import time
 import zipfile
+import traceback
 import requests
 import streamlit as st
 import concurrent.futures
@@ -206,7 +207,7 @@ def fetch_api_metadata(video_id, api_key):
         st.error(f"Failed to fetch API data: {e}")
         return None
 
-def create_proxy_auth_extension(proxy_url):
+def create_proxy_auth_extension(proxy_url, unique_id):
     pattern = r"http://([^:]+):([^@]+)@([^:]+):(\d+)"
     match = re.match(pattern, proxy_url)
     if not match:
@@ -234,23 +235,30 @@ def create_proxy_auth_extension(proxy_url):
     }}
     chrome.webRequest.onAuthRequired.addListener(callbackFn, {{urls: ["<all_urls>"]}}, ['blocking']);
     """
-    pluginpath = f'/tmp/proxy_auth_plugin_{random.randint(1000, 9999)}.zip'
+    
+    os.makedirs("/tmp/proxy_ext", exist_ok=True)
+    pluginpath = f'/tmp/proxy_ext/proxy_auth_plugin_{unique_id}_{random.randint(10000, 99999)}.zip'
     with zipfile.ZipFile(pluginpath, 'w') as zp:
         zp.writestr("manifest.json", manifest_json)
         zp.writestr("background.js", background_js)
 
     return pluginpath, None
 
-def get_headless_driver():
+def get_browser_driver(headless=False, thread_id=0):
     chrome_options = Options()
-    chrome_options.add_argument("--headless=new")
+    
+    if headless:
+        chrome_options.add_argument("--headless=new")
+        
     chrome_options.add_argument("--no-sandbox")
     chrome_options.add_argument("--disable-dev-shm-usage")
     chrome_options.add_argument("--disable-gpu")
-    chrome_options.add_argument("--window-size=1280,720")
+    chrome_options.add_argument("--window-size=1024,768")
     chrome_options.add_argument("--autoplay-policy=no-user-gesture-required")
     chrome_options.add_argument("--mute-audio")
-    chrome_options.binary_location = "/usr/bin/chromium"
+    
+    if os.path.exists("/usr/bin/chromium"):
+        chrome_options.binary_location = "/usr/bin/chromium"
 
     random_user_agent = random.choice(USER_AGENTS)
     chrome_options.add_argument(f"user-agent={random_user_agent}")
@@ -258,19 +266,19 @@ def get_headless_driver():
     pluginpath = None
     if PROXIES_FROM_SECRETS:
         selected_proxy = random.choice(PROXIES_FROM_SECRETS)
-        pluginpath, unauth_proxy = create_proxy_auth_extension(selected_proxy)
+        pluginpath, unauth_proxy = create_proxy_auth_extension(selected_proxy, thread_id)
         if pluginpath:
             chrome_options.add_extension(pluginpath)
         elif unauth_proxy:
             chrome_options.add_argument(f"--proxy-server=http://{unauth_proxy}")
 
-    service = Service("/usr/bin/chromedriver")
-    driver = webdriver.Chrome(service=service, options=chrome_options)
+    if os.path.exists("/usr/bin/chromedriver"):
+        service = Service("/usr/bin/chromedriver")
+        driver = webdriver.Chrome(service=service, options=chrome_options)
+    else:
+        driver = webdriver.Chrome(options=chrome_options)
 
-    if pluginpath and os.path.exists(pluginpath):
-        os.remove(pluginpath)
-
-    return driver
+    return driver, pluginpath
 
 # --- STEP 1: API KEY & URL INPUT ---
 api_key = API_KEY_FROM_SECRETS
@@ -331,12 +339,19 @@ if st.session_state.video_data:
     total_views = col_views.number_input("Target Total Views to Generate", min_value=1, value=10, step=1)
     watch_duration = col_dur.number_input("Playback Duration per view (seconds)", min_value=5, value=max(5, vdata['duration_sec']))
 
+    # Browser Mode Selector
+    browser_mode = st.radio(
+        "Browser Visibility Option:",
+        options=["Visible GUI Window (Opens actual browser on screen)", "Headless Mode (Background execution)"],
+        index=0
+    )
+    is_headless = "Headless" in browser_mode
+
     # --- STEP 3: START PARALLEL MULTI-THREADED AUTOMATION ---
     if st.button("Start Automation"):
         st.markdown("### 🖥️ Live Browser Stream Views")
         st.caption("Screen capture previews updating live for every running tab")
         
-        # Grid of screen capture boxes for each thread
         grid_cols = st.columns(num_threads)
         preview_placeholders = [grid_cols[i].empty() for i in range(num_threads)]
         
@@ -356,20 +371,23 @@ if st.session_state.video_data:
         logs = []
 
         def run_single_view(thread_id, view_num):
-            """Executes one view on a browser and continuously sends screenshot back to UI."""
+            """Executes one view on a browser and continuously sends screenshots back to UI."""
             driver = None
+            pluginpath = None
             try:
-                preview_placeholders[thread_id].info(f"Tab {thread_id+1}: Launching Browser...")
-                driver = get_headless_driver()
+                preview_placeholders[thread_id].info(f"Tab #{thread_id+1}: Launching Browser...")
+                driver, pluginpath = get_browser_driver(headless=is_headless, thread_id=thread_id)
+                
+                driver.set_page_load_timeout(30)
                 driver.get(url_input)
-                time.sleep(2)
+                time.sleep(3)
 
-                # Play video
+                # Attempt play
                 driver.execute_script(
                     "var video = document.querySelector('video'); if(video) { video.muted = true; video.play(); }"
                 )
 
-                # Loop to capture live small screen screenshots during watch duration
+                # Loop to capture live screenshots
                 steps = max(1, int(watch_duration // 3))
                 for _ in range(steps):
                     time.sleep(3)
@@ -383,14 +401,23 @@ if st.session_state.video_data:
                     except Exception:
                         pass
 
-                return True, thread_id, f"✅ Tab {thread_id+1}: View #{view_num} finished successfully."
+                return True, thread_id, f"✅ Tab #{thread_id+1}: View #{view_num} finished successfully."
             except Exception as e:
-                return False, thread_id, f"❌ Tab {thread_id+1}: View #{view_num} failed - {e}"
+                err_detail = str(e).split('\n')[0] if str(e) else type(e).__name__
+                return False, thread_id, f"❌ Tab #{thread_id+1}: View #{view_num} failed - {err_detail}"
             finally:
                 if driver:
-                    driver.quit()
+                    try:
+                        driver.quit()
+                    except Exception:
+                        pass
+                if pluginpath and os.path.exists(pluginpath):
+                    try:
+                        os.remove(pluginpath)
+                    except Exception:
+                        pass
 
-        # Batch execution over thread pool
+        # Execute threads concurrently
         with concurrent.futures.ThreadPoolExecutor(max_workers=num_threads) as executor:
             futures = []
             
@@ -412,11 +439,11 @@ if st.session_state.video_data:
                     failed_count += 1
                     preview_placeholders[t_id].error(f"Tab #{t_id+1}: Error")
 
-                # Real-time UI updates
+                # UI Updates
                 metric_succ.metric("Successful Views", success_count)
                 metric_fail.metric("Failed Views", failed_count)
                 metric_progress.metric("Progress Goal", f"{completed_views} / {total_views}")
                 progress_bar.progress(completed_views / total_views)
-                log_box.code("\n".join(logs[-10:]), language="text")
+                log_box.code("\n".join(logs[-12:]), language="text")
 
         st.success(f"🎉 All threads finished! Total Views completed: {success_count} Success, {failed_count} Failed.")
