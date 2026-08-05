@@ -4,10 +4,8 @@ import random
 import re
 import time
 import zipfile
-import traceback
 import requests
 import streamlit as st
-import concurrent.futures
 from selenium import webdriver
 from selenium.webdriver.chrome.options import Options
 from selenium.webdriver.chrome.service import Service
@@ -121,7 +119,7 @@ if st.sidebar.button("Logout"):
 
 # --- WELCOME BANNER ---
 st.title("🔥 Welcome to Madara Bot Service")
-st.caption("Multi-threaded playback automation with live visual stream tracking")
+st.caption("Sequential playback automation with live browser stream tracking")
 
 # --- ADMIN PANEL ---
 if is_admin:
@@ -244,7 +242,7 @@ def create_proxy_auth_extension(proxy_url, unique_id):
 
     return pluginpath, None
 
-def get_browser_driver(headless=False, thread_id=0):
+def get_browser_driver(headless=False, session_id=1):
     chrome_options = Options()
     
     if headless:
@@ -253,7 +251,7 @@ def get_browser_driver(headless=False, thread_id=0):
     chrome_options.add_argument("--no-sandbox")
     chrome_options.add_argument("--disable-dev-shm-usage")
     chrome_options.add_argument("--disable-gpu")
-    chrome_options.add_argument("--window-size=1024,768")
+    chrome_options.add_argument("--window-size=1280,720")
     chrome_options.add_argument("--autoplay-policy=no-user-gesture-required")
     chrome_options.add_argument("--mute-audio")
     
@@ -266,7 +264,7 @@ def get_browser_driver(headless=False, thread_id=0):
     pluginpath = None
     if PROXIES_FROM_SECRETS:
         selected_proxy = random.choice(PROXIES_FROM_SECRETS)
-        pluginpath, unauth_proxy = create_proxy_auth_extension(selected_proxy, thread_id)
+        pluginpath, unauth_proxy = create_proxy_auth_extension(selected_proxy, session_id)
         if pluginpath:
             chrome_options.add_extension(pluginpath)
         elif unauth_proxy:
@@ -306,7 +304,7 @@ if submit_btn:
                     st.session_state.video_data = metadata
                     st.success("Metadata successfully loaded!")
 
-# --- STEP 2: DISPLAY METADATA & MULTI-THREAD SETTINGS ---
+# --- STEP 2: DISPLAY METADATA & SEQUENTIAL AUTOMATION SETTINGS ---
 if st.session_state.video_data:
     vdata = st.session_state.video_data
     
@@ -327,15 +325,14 @@ if st.session_state.video_data:
         st.write(f"**Current Total Views on YouTube:** {formatted_views}")
 
     st.markdown("---")
-    st.subheader("Multi-Threaded Automation Setup")
+    st.subheader("Sequential Automation Setup")
     
     if PROXIES_FROM_SECRETS:
         st.info(f"Proxy pool active: {len(PROXIES_FROM_SECRETS)} rotating proxies loaded from Secrets.")
     else:
         st.warning("No proxies configured in Secrets. Running directly from server IP.")
 
-    col_threads, col_views, col_dur = st.columns(3)
-    num_threads = col_threads.number_input("Concurrent Tabs / Threads", min_value=1, max_value=8, value=3, help="How many browsers run at the exact same time")
+    col_views, col_dur = st.columns(2)
     total_views = col_views.number_input("Target Total Views to Generate", min_value=1, value=10, step=1)
     watch_duration = col_dur.number_input("Playback Duration per view (seconds)", min_value=5, value=max(5, vdata['duration_sec']))
 
@@ -347,13 +344,12 @@ if st.session_state.video_data:
     )
     is_headless = "Headless" in browser_mode
 
-    # --- STEP 3: START PARALLEL MULTI-THREADED AUTOMATION ---
+    # --- STEP 3: START SEQUENTIAL AUTOMATION ---
     if st.button("Start Automation"):
-        st.markdown("### 🖥️ Live Browser Stream Views")
-        st.caption("Screen capture previews updating live for every running tab")
+        st.markdown("### 🖥️ Active Browser View")
+        st.caption("Live stream preview updating for the currently playing session")
         
-        grid_cols = st.columns(num_threads)
-        preview_placeholders = [grid_cols[i].empty() for i in range(num_threads)]
+        preview_container = st.empty()
         
         st.markdown("### 📊 Real-Time Analytics Dashboard")
         m1, m2, m3 = st.columns(3)
@@ -367,44 +363,51 @@ if st.session_state.video_data:
 
         success_count = 0
         failed_count = 0
-        completed_views = 0
         logs = []
 
-        def run_single_view(thread_id, view_num):
-            """Executes one view on a browser and continuously sends screenshots back to UI."""
+        # Run each video session ONE BY ONE in sequence
+        for current_view in range(1, int(total_views) + 1):
+            timestamp = time.strftime("%H:%M:%S")
+            preview_container.info(f"⏳ Session #{current_view} of {total_views}: Launching Browser...")
+            
             driver = None
             pluginpath = None
+            session_passed = False
+            
             try:
-                preview_placeholders[thread_id].info(f"Tab #{thread_id+1}: Launching Browser...")
-                driver, pluginpath = get_browser_driver(headless=is_headless, thread_id=thread_id)
-                
+                driver, pluginpath = get_browser_driver(headless=is_headless, session_id=current_view)
                 driver.set_page_load_timeout(30)
                 driver.get(url_input)
                 time.sleep(3)
 
-                # Attempt play
+                # Play video
                 driver.execute_script(
                     "var video = document.querySelector('video'); if(video) { video.muted = true; video.play(); }"
                 )
 
-                # Loop to capture live screenshots
+                # Capture real-time screenshots while playing sequentially
                 steps = max(1, int(watch_duration // 3))
-                for _ in range(steps):
+                for step in range(steps):
                     time.sleep(3)
                     try:
                         screenshot = driver.get_screenshot_as_png()
-                        preview_placeholders[thread_id].image(
+                        preview_container.image(
                             screenshot,
-                            caption=f"Tab #{thread_id+1} | View #{view_num} Playing...",
+                            caption=f"View #{current_view} of {total_views} | Playing ({step * 3}/{watch_duration} seconds)...",
                             use_container_width=True
                         )
                     except Exception:
                         pass
-
-                return True, thread_id, f"✅ Tab #{thread_id+1}: View #{view_num} finished successfully."
+                
+                session_passed = True
+                success_count += 1
+                logs.append(f"[{timestamp}] ✅ View #{current_view} completed successfully.")
+            
             except Exception as e:
                 err_detail = str(e).split('\n')[0] if str(e) else type(e).__name__
-                return False, thread_id, f"❌ Tab #{thread_id+1}: View #{view_num} failed - {err_detail}"
+                failed_count += 1
+                logs.append(f"[{timestamp}] ❌ View #{current_view} failed - {err_detail}")
+            
             finally:
                 if driver:
                     try:
@@ -417,33 +420,12 @@ if st.session_state.video_data:
                     except Exception:
                         pass
 
-        # Execute threads concurrently
-        with concurrent.futures.ThreadPoolExecutor(max_workers=num_threads) as executor:
-            futures = []
-            
-            for i in range(total_views):
-                thread_assigned = i % num_threads
-                futures.append(executor.submit(run_single_view, thread_assigned, i + 1))
-            
-            for future in concurrent.futures.as_completed(futures):
-                passed, t_id, log_msg = future.result()
-                completed_views += 1
-                
-                timestamp = time.strftime("%H:%M:%S")
-                logs.append(f"[{timestamp}] {log_msg}")
-                
-                if passed:
-                    success_count += 1
-                    preview_placeholders[t_id].success(f"Tab #{t_id+1}: Done!")
-                else:
-                    failed_count += 1
-                    preview_placeholders[t_id].error(f"Tab #{t_id+1}: Error")
+            # Update dashboard stats sequentially after each session
+            metric_succ.metric("Successful Views", success_count)
+            metric_fail.metric("Failed Views", failed_count)
+            metric_progress.metric("Progress Goal", f"{current_view} / {total_views}")
+            progress_bar.progress(current_view / total_views)
+            log_box.code("\n".join(logs[-12:]), language="text")
 
-                # UI Updates
-                metric_succ.metric("Successful Views", success_count)
-                metric_fail.metric("Failed Views", failed_count)
-                metric_progress.metric("Progress Goal", f"{completed_views} / {total_views}")
-                progress_bar.progress(completed_views / total_views)
-                log_box.code("\n".join(logs[-12:]), language="text")
-
-        st.success(f"🎉 All threads finished! Total Views completed: {success_count} Success, {failed_count} Failed.")
+        preview_container.empty()
+        st.success(f"🎉 Sequential automation completed! Final stats: {success_count} Passed, {failed_count} Failed.")
