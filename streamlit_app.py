@@ -62,7 +62,6 @@ def fetch_api_metadata(video_id, api_key):
         content_details = video_info.get("contentDetails", {})
         statistics = video_info.get("statistics", {})
 
-        # Pick best thumbnail available
         thumbnails = snippet.get("thumbnails", {})
         thumb_url = (
             thumbnails.get("maxres", {}).get("url") or 
@@ -80,14 +79,21 @@ def fetch_api_metadata(video_id, api_key):
         st.error(f"Failed to fetch API data: {e}")
         return None
 
-# --- STEP 1: API KEY & URL INPUT ---
-api_key = st.text_input("YouTube Data API Key", type="password", placeholder="AIzaSy...")
+# --- STEP 1: API KEY RETRIEVAL & URL INPUT ---
+# Check if API Key exists in Streamlit Secrets
+api_key = ""
+if "YOUTUBE_API_KEY" in st.secrets:
+    api_key = st.secrets["YOUTUBE_API_KEY"]
+    st.success("API Key automatically loaded from Streamlit Secrets!")
+else:
+    api_key = st.text_input("YouTube Data API Key", type="password", placeholder="AIzaSy...")
+
 url_input = st.text_input("YouTube Video URL", placeholder="https://www.youtube.com/watch?v=... or shorts URL")
 submit_btn = st.button("Submit & Fetch Data")
 
 if submit_btn:
     if not api_key:
-        st.warning("Please enter your YouTube API Key.")
+        st.warning("Please enter your YouTube API Key or set it up in Streamlit Secrets.")
     elif not url_input:
         st.warning("Please enter a YouTube video URL.")
     else:
@@ -115,12 +121,10 @@ if st.session_state.video_data:
     with col2:
         st.write(f"**Title:** {vdata['title']}")
         
-        # Format seconds into HH:MM:SS
         mins, secs = divmod(vdata['duration_sec'], 60)
         hrs, mins = divmod(mins, 60)
         st.write(f"**Duration:** {hrs:02d}:{mins:02d}:{secs:02d} ({vdata['duration_sec']} seconds)")
         
-        # Show actual live view count from API
         formatted_views = f"{int(vdata['current_views']):,}" if vdata['current_views'].isdigit() else vdata['current_views']
         st.write(f"**Current Total Views on YouTube:** {formatted_views}")
 
@@ -135,7 +139,6 @@ if st.session_state.video_data:
         value=max(1, vdata['duration_sec'])
     )
 
-    # --- SELENIUM HEADLESS DRIVER SETUP ---
     def get_headless_driver():
         chrome_options = Options()
         chrome_options.add_argument("--headless=new")
@@ -160,9 +163,8 @@ if st.session_state.video_data:
             try:
                 driver = get_headless_driver()
                 driver.get(url_input)
-                time.sleep(3)  # Wait for page elements to mount
+                time.sleep(3)
 
-                # Force playback start via JavaScript
                 driver.execute_script(
                     "var video = document.querySelector('video'); if(video) { video.muted = true; video.play(); }"
                 )
