@@ -1,3 +1,4 @@
+import json
 import os
 import random
 import re
@@ -9,11 +10,10 @@ from selenium import webdriver
 from selenium.webdriver.chrome.options import Options
 from selenium.webdriver.chrome.service import Service
 
-st.set_page_config(page_title="YouTube Automation", layout="centered")
-st.title("YouTube Automation Tool")
-st.caption("Fetch metadata via YouTube Data API v3 & automate playback via Selenium")
+# --- CONFIGURATION ---
+ADMIN_EMAIL = "kingtechnical421@gmail.com"
+USER_DB_FILE = "users.json"
 
-# --- USER AGENTS & SECRETS CONFIGURATION ---
 USER_AGENTS = [
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
     "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36",
@@ -24,10 +24,127 @@ USER_AGENTS = [
 API_KEY_FROM_SECRETS = st.secrets.get("YOUTUBE_API_KEY", "")
 PROXIES_FROM_SECRETS = st.secrets.get("PROXIES", [])
 
+st.set_page_config(page_title="YouTube Automation Tool", layout="centered")
+
+# --- JSON DATABASE HELPER FUNCTIONS ---
+def load_users():
+    """Load user data from users.json file."""
+    if not os.path.exists(USER_DB_FILE):
+        default_db = {
+            ADMIN_EMAIL: {"status": "approved", "role": "admin"}
+        }
+        with open(USER_DB_FILE, "w") as f:
+            json.dump(default_db, f, indent=4)
+        return default_db
+    try:
+        with open(USER_DB_FILE, "r") as f:
+            users = json.load(f)
+            # Ensure Admin exists with approved status
+            if ADMIN_EMAIL not in users:
+                users[ADMIN_EMAIL] = {"status": "approved", "role": "admin"}
+                save_users(users)
+            return users
+    except Exception:
+        return {ADMIN_EMAIL: {"status": "approved", "role": "admin"}}
+
+def save_users(users):
+    """Save user data back to users.json file."""
+    with open(USER_DB_FILE, "w") as f:
+        json.dump(users, f, indent=4)
+
+# Load users on runtime
+users_db = load_users()
+
+# Initialize Session State
+if "logged_in_user" not in st.session_state:
+    st.session_state.logged_in_user = None
 if "video_data" not in st.session_state:
     st.session_state.video_data = None
 
-# --- HELPER FUNCTIONS ---
+# --- AUTHENTICATION & LOGIN UI ---
+st.sidebar.title("🔐 Authentication")
+
+if st.session_state.logged_in_user is None:
+    st.subheader("Login to Access the Automation Tool")
+    email_input = st.text_input("Enter your Email Address:").strip().lower()
+    
+    if st.button("Login / Submit Request"):
+        if not email_input or "@" not in email_input:
+            st.error("Please enter a valid email address.")
+        else:
+            if email_input == ADMIN_EMAIL:
+                st.session_state.logged_in_user = email_input
+                st.success("Welcome back, Admin!")
+                st.rerun()
+            elif email_input in users_db:
+                status = users_db[email_input].get("status")
+                if status == "approved":
+                    st.session_state.logged_in_user = email_input
+                    st.success("Login successful!")
+                    st.rerun()
+                elif status == "pending":
+                    st.warning("Your access request is currently PENDING approval from the Admin.")
+                elif status == "rejected":
+                    st.error("Your access request was rejected by the Admin.")
+            else:
+                # Add new user as pending
+                users_db[email_input] = {"status": "pending", "role": "user"}
+                save_users(users_db)
+                st.info("Access request sent to Admin! Please wait for approval before logging in.")
+    st.stop()  # Stop app execution if user is not authenticated
+
+# --- LOGGED IN HEADER ---
+user_email = st.session_state.logged_in_user
+is_admin = (user_email == ADMIN_EMAIL)
+
+st.sidebar.write(f"Logged in as: **{user_email}**")
+if is_admin:
+    st.sidebar.write("👑 **Role:** Administrator")
+else:
+    st.sidebar.write("👤 **Role:** Standard User")
+
+if st.sidebar.button("Logout"):
+    st.session_state.logged_in_user = None
+    st.session_state.video_data = None
+    st.rerun()
+
+# --- ADMIN PANEL (Visible ONLY to kingtechnical421@gmail.com) ---
+if is_admin:
+    st.markdown("## 🛡️ Admin Control Panel")
+    st.caption("Manage pending user requests and view all registered accounts.")
+    
+    pending_users = [email for email, data in users_db.items() if data.get("status") == "pending"]
+    
+    if pending_users:
+        st.subheader("⚠️ Pending Requests")
+        for p_email in pending_users:
+            col_email, col_approve, col_reject = st.columns([3, 1, 1])
+            col_email.write(p_email)
+            
+            if col_approve.button("Approve", key=f"app_{p_email}"):
+                users_db[p_email]["status"] = "approved"
+                save_users(users_db)
+                st.success(f"Approved {p_email}")
+                st.rerun()
+                
+            if col_reject.button("Reject", key=f"rej_{p_email}"):
+                users_db[p_email]["status"] = "rejected"
+                save_users(users_db)
+                st.error(f"Rejected {p_email}")
+                st.rerun()
+    else:
+        st.info("No pending access requests.")
+
+    with st.expander("📁 View All Registered Users (Stored in users.json)"):
+        st.json(users_db)
+
+    st.markdown("---")
+
+# --- MAIN AUTOMATION TOOL (ACCESSIBLE TO APPROVED USERS) ---
+st.title("YouTube Automation Tool")
+st.caption("Fetch metadata via YouTube Data API v3 & automate playback via Selenium")
+
+# Helper functions for YouTube & Driver
 def extract_video_id(url):
     patterns = [
         r"(?:v=|\/)([0-9A-Za-z_-]{11}).*",
@@ -88,7 +205,6 @@ def fetch_api_metadata(video_id, api_key):
         return None
 
 def create_proxy_auth_extension(proxy_url):
-    """Creates a temporary Chrome Extension ZIP to handle authenticated proxies."""
     pattern = r"http://([^:]+):([^@]+)@([^:]+):(\d+)"
     match = re.match(pattern, proxy_url)
     if not match:
@@ -101,18 +217,8 @@ def create_proxy_auth_extension(proxy_url):
         "version": "1.0.0",
         "manifest_version": 2,
         "name": "Chrome Proxy",
-        "permissions": [
-            "proxy",
-            "tabs",
-            "unlimitedStorage",
-            "storage",
-            "<all_urls>",
-            "webRequest",
-            "webRequestBlocking"
-        ],
-        "background": {
-            "scripts": ["background.js"]
-        },
+        "permissions": ["proxy", "tabs", "unlimitedStorage", "storage", "<all_urls>", "webRequest", "webRequestBlocking"],
+        "background": {"scripts": ["background.js"]},
         "minimum_chrome_version": "22.0.0"
     }
     """
@@ -120,32 +226,13 @@ def create_proxy_auth_extension(proxy_url):
     background_js = f"""
     var config = {{
         mode: "fixed_servers",
-        rules: {{
-          singleProxy: {{
-            scheme: "http",
-            host: "{host}",
-            port: parseInt({port})
-          }},
-          bypassList: ["localhost"]
-        }}
-      }};
-
+        rules: {{ singleProxy: {{ scheme: "http", host: "{host}", port: parseInt({port}) }}, bypassList: ["localhost"] }}
+    }};
     chrome.proxy.settings.set({{value: config, scope: "regular"}}, function() {{}});
-
     function callbackFn(details) {{
-        return {{
-            authCredentials: {{
-                username: "{user}",
-                password: "{password}"
-            }}
-        }};
+        return {{ authCredentials: {{ username: "{user}", password: "{password}" }} }};
     }}
-
-    chrome.webRequest.onAuthRequired.addListener(
-        callbackFn,
-        {{urls: ["<all_urls>"]}},
-        ['blocking']
-    );
+    chrome.webRequest.onAuthRequired.addListener(callbackFn, {{urls: ["<all_urls>"]}}, ['blocking']);
     """
 
     pluginpath = f'/tmp/proxy_auth_plugin_{random.randint(1000, 9999)}.zip'
@@ -155,7 +242,7 @@ def create_proxy_auth_extension(proxy_url):
 
     return pluginpath, None
 
-# --- STEP 1: API KEY RETRIEVAL & URL INPUT ---
+# --- STEP 1: API KEY & URL INPUT ---
 api_key = API_KEY_FROM_SECRETS
 if api_key:
     st.success("YouTube API Key loaded from Streamlit Secrets!")
@@ -210,12 +297,7 @@ if st.session_state.video_data:
         st.warning("No proxies configured in Secrets. Running directly from server IP.")
 
     total_views = st.number_input("Target Total Views to Generate", min_value=1, value=10, step=1)
-    
-    watch_duration = st.number_input(
-        "Playback Duration per view (seconds)", 
-        min_value=1, 
-        value=max(1, vdata['duration_sec'])
-    )
+    watch_duration = st.number_input("Playback Duration per view (seconds)", min_value=1, value=max(1, vdata['duration_sec']))
 
     def get_headless_driver():
         chrome_options = Options()
@@ -225,8 +307,6 @@ if st.session_state.video_data:
         chrome_options.add_argument("--disable-gpu")
         chrome_options.add_argument("--autoplay-policy=no-user-gesture-required")
         chrome_options.add_argument("--mute-audio")
-
-        # Set location of system Chromium binary
         chrome_options.binary_location = "/usr/bin/chromium"
 
         random_user_agent = random.choice(USER_AGENTS)
@@ -241,7 +321,6 @@ if st.session_state.video_data:
             elif unauth_proxy:
                 chrome_options.add_argument(f"--proxy-server=http://{unauth_proxy}")
 
-        # Point to system chromedriver binary
         service = Service("/usr/bin/chromedriver")
         driver = webdriver.Chrome(service=service, options=chrome_options)
 
