@@ -1,6 +1,5 @@
 streamlit
 selenium
-selenium-wire
 webdriver-manager
 requests
 Pillow
