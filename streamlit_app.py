@@ -342,15 +342,34 @@ if st.session_state.video_data:
 
         return driver
 
-    # --- STEP 3: START AUTOMATION ---
+   # --- STEP 3: START AUTOMATION WITH REAL-TIME STATS ---
     if st.button("Start Automation"):
+        # Real-time metrics dashboard counters
+        success_count = 0
+        failed_count = 0
+        
+        # Display Containers for real-time updates
+        st.markdown("### 📊 Real-Time Automation Stats")
+        col_succ, col_fail, col_total = st.columns(3)
+        
+        metric_succ = col_succ.metric("Successful Views", 0)
+        metric_fail = col_fail.metric("Failed Views", 0)
+        metric_total = col_total.metric("Target Goal", f"0 / {total_views}")
+
         status_text = st.empty()
         progress_bar = st.progress(0)
+        
+        st.markdown("#### 📜 Live Execution Logs")
+        log_box = st.empty()
+        logs = []
 
         for current_view in range(1, int(total_views) + 1):
-            status_text.info(f"Running session {current_view} of {total_views}...")
+            timestamp = time.strftime("%H:%M:%S")
+            status_text.info(f"⏳ Running session {current_view} of {total_views}...")
             
             driver = None
+            session_success = False
+            
             try:
                 driver = get_headless_driver()
                 driver.get(url_input)
@@ -361,13 +380,25 @@ if st.session_state.video_data:
                 )
                 
                 time.sleep(watch_duration)
+                session_success = True
                 
             except Exception as e:
-                st.error(f"Error on iteration {current_view}: {e}")
+                logs.append(f"❌ [{timestamp}] Session {current_view}/{total_views} Failed - Error: {e}")
+                failed_count += 1
+            else:
+                logs.append(f"✅ [{timestamp}] Session {current_view}/{total_views} Completed Successfully!")
+                success_count += 1
             finally:
                 if driver:
                     driver.quit()
 
+            # Update real-time metric UI components
+            metric_succ.metric("Successful Views", success_count)
+            metric_fail.metric("Failed Views", failed_count)
+            metric_total.metric("Progress", f"{current_view} / {total_views}")
+            
+            # Update Progress Bar & Execution Log Container
             progress_bar.progress(current_view / total_views)
+            log_box.code("\n".join(logs[-10:]), language="text")  # Display last 10 log entries
 
-        status_text.success(f"Automation finished for {total_views} view iterations!")
+        status_text.success(f"🎉 Automation finished! Final stats: {success_count} Passed, {failed_count} Failed.")
