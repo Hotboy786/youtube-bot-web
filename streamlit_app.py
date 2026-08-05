@@ -242,21 +242,24 @@ def create_proxy_auth_extension(proxy_url, unique_id):
 
     return pluginpath, None
 
-def get_browser_driver(headless=False, session_id=1):
+def get_browser_driver(headless=True, session_id=1):
     chrome_options = Options()
     
-    if headless:
-        chrome_options.add_argument("--headless=new")
-        
+    # Required flags to run Chrome on servers without crashing
+    chrome_options.add_argument("--headless=new")
     chrome_options.add_argument("--no-sandbox")
     chrome_options.add_argument("--disable-dev-shm-usage")
     chrome_options.add_argument("--disable-gpu")
+    chrome_options.add_argument("--remote-debugging-pipe")
     chrome_options.add_argument("--window-size=1280,720")
     chrome_options.add_argument("--autoplay-policy=no-user-gesture-required")
     chrome_options.add_argument("--mute-audio")
-    
-    if os.path.exists("/usr/bin/chromium"):
-        chrome_options.binary_location = "/usr/bin/chromium"
+
+    # Standard fallback binary locations if available
+    for binary_path in ["/usr/bin/chromium-browser", "/usr/bin/chromium", "/usr/bin/google-chrome"]:
+        if os.path.exists(binary_path):
+            chrome_options.binary_location = binary_path
+            break
 
     random_user_agent = random.choice(USER_AGENTS)
     chrome_options.add_argument(f"user-agent={random_user_agent}")
@@ -270,12 +273,7 @@ def get_browser_driver(headless=False, session_id=1):
         elif unauth_proxy:
             chrome_options.add_argument(f"--proxy-server=http://{unauth_proxy}")
 
-    if os.path.exists("/usr/bin/chromedriver"):
-        service = Service("/usr/bin/chromedriver")
-        driver = webdriver.Chrome(service=service, options=chrome_options)
-    else:
-        driver = webdriver.Chrome(options=chrome_options)
-
+    driver = webdriver.Chrome(options=chrome_options)
     return driver, pluginpath
 
 # --- STEP 1: API KEY & URL INPUT ---
@@ -336,14 +334,6 @@ if st.session_state.video_data:
     total_views = col_views.number_input("Target Total Views to Generate", min_value=1, value=10, step=1)
     watch_duration = col_dur.number_input("Playback Duration per view (seconds)", min_value=5, value=max(5, vdata['duration_sec']))
 
-    # Browser Mode Selector
-    browser_mode = st.radio(
-        "Browser Visibility Option:",
-        options=["Visible GUI Window (Opens actual browser on screen)", "Headless Mode (Background execution)"],
-        index=0
-    )
-    is_headless = "Headless" in browser_mode
-
     # --- STEP 3: START SEQUENTIAL AUTOMATION ---
     if st.button("Start Automation"):
         st.markdown("### 🖥️ Active Browser View")
@@ -372,15 +362,14 @@ if st.session_state.video_data:
             
             driver = None
             pluginpath = None
-            session_passed = False
             
             try:
-                driver, pluginpath = get_browser_driver(headless=is_headless, session_id=current_view)
+                driver, pluginpath = get_browser_driver(session_id=current_view)
                 driver.set_page_load_timeout(30)
                 driver.get(url_input)
                 time.sleep(3)
 
-                # Play video
+                # Play video via JavaScript
                 driver.execute_script(
                     "var video = document.querySelector('video'); if(video) { video.muted = true; video.play(); }"
                 )
@@ -399,7 +388,6 @@ if st.session_state.video_data:
                     except Exception:
                         pass
                 
-                session_passed = True
                 success_count += 1
                 logs.append(f"[{timestamp}] ✅ View #{current_view} completed successfully.")
             
