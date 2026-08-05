@@ -1,8 +1,9 @@
+import random
 import re
 import time
 import requests
 import streamlit as st
-from selenium import webdriver
+from seleniumwire import webdriver  # Handles proxy authentication seamlessly
 from selenium.webdriver.chrome.options import Options
 from selenium.webdriver.chrome.service import Service
 from webdriver_manager.chrome import ChromeDriverManager
@@ -12,7 +13,19 @@ st.set_page_config(page_title="YouTube Automation", layout="centered")
 st.title("YouTube Automation Tool")
 st.caption("Fetch metadata via YouTube Data API v3 & automate playback via Selenium")
 
-# Initialize session state for fetched metadata
+# --- USER AGENTS & SECRETS CONFIGURATION ---
+USER_AGENTS = [
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36",
+    "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:123.0) Gecko/20100101 Firefox/123.0"
+]
+
+# Pull API Key and Proxies safely from Streamlit Secrets
+API_KEY_FROM_SECRETS = st.secrets.get("YOUTUBE_API_KEY", "")
+PROXIES_FROM_SECRETS = st.secrets.get("PROXIES", [])
+
+# Initialize session state for storing fetched metadata across reruns
 if "video_data" not in st.session_state:
     st.session_state.video_data = None
 
@@ -80,11 +93,9 @@ def fetch_api_metadata(video_id, api_key):
         return None
 
 # --- STEP 1: API KEY RETRIEVAL & URL INPUT ---
-# Check if API Key exists in Streamlit Secrets
-api_key = ""
-if "YOUTUBE_API_KEY" in st.secrets:
-    api_key = st.secrets["YOUTUBE_API_KEY"]
-    st.success("API Key automatically loaded from Streamlit Secrets!")
+api_key = API_KEY_FROM_SECRETS
+if api_key:
+    st.success("YouTube API Key loaded from Streamlit Secrets!")
 else:
     api_key = st.text_input("YouTube Data API Key", type="password", placeholder="AIzaSy...")
 
@@ -93,7 +104,7 @@ submit_btn = st.button("Submit & Fetch Data")
 
 if submit_btn:
     if not api_key:
-        st.warning("Please enter your YouTube API Key or set it up in Streamlit Secrets.")
+        st.warning("Please enter your YouTube API Key or configure it in Streamlit Secrets.")
     elif not url_input:
         st.warning("Please enter a YouTube video URL.")
     else:
@@ -121,6 +132,7 @@ if st.session_state.video_data:
     with col2:
         st.write(f"**Title:** {vdata['title']}")
         
+        # Convert seconds to HH:MM:SS format
         mins, secs = divmod(vdata['duration_sec'], 60)
         hrs, mins = divmod(mins, 60)
         st.write(f"**Duration:** {hrs:02d}:{mins:02d}:{secs:02d} ({vdata['duration_sec']} seconds)")
@@ -131,6 +143,11 @@ if st.session_state.video_data:
     st.markdown("---")
     st.subheader("Automation Setup")
     
+    if PROXIES_FROM_SECRETS:
+        st.info(f"Proxy pool active: {len(PROXIES_FROM_SECRETS)} rotating proxies loaded from Secrets.")
+    else:
+        st.warning("No proxies configured in Secrets. Requests will run directly from server IP.")
+
     total_views = st.number_input("Target Total Views to Generate", min_value=1, value=10, step=1)
     
     watch_duration = st.number_input(
@@ -139,6 +156,7 @@ if st.session_state.video_data:
         value=max(1, vdata['duration_sec'])
     )
 
+    # --- SELENIUM HEADLESS DRIVER SETUP WITH PROXY ROTATION ---
     def get_headless_driver():
         chrome_options = Options()
         chrome_options.add_argument("--headless=new")
@@ -147,9 +165,30 @@ if st.session_state.video_data:
         chrome_options.add_argument("--disable-gpu")
         chrome_options.add_argument("--autoplay-policy=no-user-gesture-required")
         chrome_options.add_argument("--mute-audio")
-        
+
+        # Set a random User-Agent header
+        random_user_agent = random.choice(USER_AGENTS)
+        chrome_options.add_argument(f"user-agent={random_user_agent}")
+
         service = Service(ChromeDriverManager(chrome_type=ChromeType.CHROMIUM).install())
-        return webdriver.Chrome(service=service, options=chrome_options)
+
+        # Inject rotating proxy if available in Secrets
+        if PROXIES_FROM_SECRETS:
+            selected_proxy = random.choice(PROXIES_FROM_SECRETS)
+            seleniumwire_options = {
+                'proxy': {
+                    'http': selected_proxy,
+                    'https': selected_proxy,
+                    'no_proxy': 'localhost,127.0.0.1'
+                }
+            }
+            return webdriver.Chrome(
+                service=service,
+                options=chrome_options,
+                seleniumwire_options=seleniumwire_options
+            )
+        else:
+            return webdriver.Chrome(service=service, options=chrome_options)
 
     # --- STEP 3: START AUTOMATION ---
     if st.button("Start Automation"):
@@ -163,8 +202,9 @@ if st.session_state.video_data:
             try:
                 driver = get_headless_driver()
                 driver.get(url_input)
-                time.sleep(3)
+                time.sleep(3)  # Wait for player script elements to initialize
 
+                # Force playback start via JavaScript execution
                 driver.execute_script(
                     "var video = document.querySelector('video'); if(video) { video.muted = true; video.play(); }"
                 )
