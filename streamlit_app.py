@@ -8,8 +8,6 @@ import streamlit as st
 from selenium import webdriver
 from selenium.webdriver.chrome.options import Options
 from selenium.webdriver.chrome.service import Service
-from webdriver_manager.chrome import ChromeDriverManager
-from webdriver_manager.core.os_manager import ChromeType
 
 st.set_page_config(page_title="YouTube Automation", layout="centered")
 st.title("YouTube Automation Tool")
@@ -94,7 +92,7 @@ def create_proxy_auth_extension(proxy_url):
     pattern = r"http://([^:]+):([^@]+)@([^:]+):(\d+)"
     match = re.match(pattern, proxy_url)
     if not match:
-        return None, proxy_url.replace("http://", "")  # IP:Port format without user/pass
+        return None, proxy_url.replace("http://", "")
 
     user, password, host, port = match.groups()
 
@@ -228,6 +226,9 @@ if st.session_state.video_data:
         chrome_options.add_argument("--autoplay-policy=no-user-gesture-required")
         chrome_options.add_argument("--mute-audio")
 
+        # Set location of system Chromium binary
+        chrome_options.binary_location = "/usr/bin/chromium"
+
         random_user_agent = random.choice(USER_AGENTS)
         chrome_options.add_argument(f"user-agent={random_user_agent}")
 
@@ -240,10 +241,10 @@ if st.session_state.video_data:
             elif unauth_proxy:
                 chrome_options.add_argument(f"--proxy-server=http://{unauth_proxy}")
 
-        service = Service(ChromeDriverManager(chrome_type=ChromeType.CHROMIUM).install())
+        # Point to system chromedriver binary
+        service = Service("/usr/bin/chromedriver")
         driver = webdriver.Chrome(service=service, options=chrome_options)
 
-        # Cleanup extension zip file after load
         if pluginpath and os.path.exists(pluginpath):
             os.remove(pluginpath)
 
